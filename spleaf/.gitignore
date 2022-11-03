@@ -1,7 +1,0 @@
-MANIFEST
-dist/*
-doc/build/*
-doc/source/_autosummary/*
-*/__pycache__/*
-*.egg-info
-other/*
