@@ -7,7 +7,7 @@ warnings.filterwarnings('ignore')
 import numpy as np
 from scipy.interpolate import InterpolatedUnivariateSpline
 from scipy.optimize import minimize
-from spleaf import Cov
+import spleaf.cov as Cov
 from kepderiv import Keplerian
 import tools
 from scaledAdaptiveMetropolis import sam
