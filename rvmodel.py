@@ -4,22 +4,8 @@
 
 import warnings
 warnings.filterwarnings('ignore')
-import astropy
 import numpy as np
-from numpy import ma
 from scipy.interpolate import InterpolatedUnivariateSpline
-import pandas as pd
-import pylab as pl
-from glob import glob
-import os
-import matplotlib.pyplot as plt
-from scipy.stats import norm
-from dace.spectroscopy import Spectroscopy
-from astroquery.simbad import Simbad
-from rvmodel import *
-import corner
-import copy
-import numpy as np
 from scipy.optimize import minimize
 from spleaf.rv import Cov
 from kepderiv import Keplerian
