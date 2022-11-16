@@ -2,9 +2,12 @@
 
 # Copyright 2019 Jean-Baptiste Delisle
 
+import warnings
+warnings.filterwarnings('ignore')
 import numpy as np
+from scipy.interpolate import InterpolatedUnivariateSpline
 from scipy.optimize import minimize
-from spleaf.rv import Cov
+import spleaf.cov as Cov
 from kepderiv import Keplerian
 import tools
 from scaledAdaptiveMetropolis import sam
@@ -17,8 +20,8 @@ default_inst_sec_acc = {
 	'HARPS03': True,
 	'HARPS15': True,
 	'HARPN': True,
-	'HIRES': False,
-	'UCLES': False,
+	'HIRES': True,
+	'UCLES': True,
 	'ESPRESSO': True,
 	'SOPHIE': True,
 	'ELODIE': True,
@@ -60,6 +63,182 @@ class rvModel():
     self.linM = np.empty((0,self.n))
 
     self.fitparams = []
+
+  def wav_to_dvel(wav,c):
+      dvel = (wav[1:] - wav[:-1]) / (wav[1:]) * c
+      return dvel
+
+  def loglambda(wav0, flux0,c):
+    assert wav0.shape == flux0.shape
+    npix = wav0.size
+    wav = np.logspace(np.log10(wav0[0]), np.log10(wav0[-1]), wav0.size)
+    spline = InterpolatedUnivariateSpline(wav0, flux0)
+    flux = spline(wav)
+    dvel = rvModel.wav_to_dvel(wav,c)
+    dvel = np.mean(dvel)
+    return wav, flux, dvel
+
+  def CCF(flux, ref_flux, nwav, dvel, ref_wav, wav):
+    ref_spline = InterpolatedUnivariateSpline(ref_wav, ref_flux)
+    ref_flux = ref_spline(wav)
+    flux -= np.mean(flux)
+    ref_flux -= np.mean(ref_flux)
+    lag = np.arange(-nwav + 1, nwav) 
+    dvel = -1.0 * lag * dvel
+    a = ref_flux
+    b = flux
+    a=(a-np.min(a))/(np.max(a)-np.min(a))
+    b=(b-np.min(b))/(np.max(b)-np.min(b))
+    f_a=np.fft.fft(a)
+    f_b=np.fft.fft(b)
+    f_a_c=np.conj(f_a)
+    c_corr=np.fft.ifft(f_a_c*f_b)
+    c_corr=np.abs(np.roll(c_corr,len(c_corr) // 2))
+    corr=(c_corr-np.min(c_corr))/(np.max(c_corr)-np.min(c_corr))
+    s = int(len(corr)/2)
+    e = -s+1
+    dv = -dvel[s:e]
+    return dv,corr 
+
+  def lin_param(ninst,rv_data,dpow,rv_model,rhk_model,indic_filter_timescale_yr,indic_kernel_smoother,indic_filter_type,Filter):
+    for kinst in range(ninst):
+        rv_model.addlin(1.0*(rv_data['inst_id']==kinst), 'offset_inst_{}'.format(kinst))
+    for kpow in range(dpow):
+        rv_model.addlin(rv_model.t**(kpow+1), 'drift_pow{}'.format(kpow+1))
+    
+    for kinst in range(ninst):
+        rhk_model.addlin(1.0*(rv_data['inst_id']==kinst), 'offset_inst_{}'.format(kinst))
+    for kpow in range(dpow):
+        rhk_model.addlin(rhk_model.t**(kpow+1), 'drift_pow{}'.format(kpow+1))
+    
+    indic = "rhk"
+    kind = 0
+    tmp = rv_data[indic].copy()
+    if indic_kernel_smoother[kind] is not None:
+        tmp_smooth = tools.smooth_series(
+            rv_data['rjd']/(365.25*indic_filter_timescale_yr[kind]),
+            tmp,
+            indic_kernel_smoother[kind])
+        if indic_filter_type[kind] == 'high':
+            tmp -= tmp_smooth
+        else:
+            tmp = tmp_smooth
+    tmpmx = tmp.max()
+    tmpmn = tmp.min()
+    tmp = 2.0*(tmp-tmpmn)/(tmpmx-tmpmn) - 1.0
+    indic_name = indic
+    if indic_filter_type[kind] is not None:
+        indic_name += "_" + indic_filter_type[kind]
+        
+    if Filter == 1 or Filter == 2 or Filter == 3:
+        rv_model.addlin(tmp, indic_name)
+    return rv_model,rhk_model,indic_name,tmp
+
+  def organize_data(instruments,rv_data,data_from_Dace,indicators):
+    if instruments == []:
+        for inst in data_from_Dace:
+            for drs in data_from_Dace[inst]:
+                for mode in data_from_Dace[inst][drs]:
+                    instruments.append((inst,drs,mode))
+    ninst = len(instruments)
+    for kinst, inst in enumerate(instruments):
+        data_inst = data_from_Dace[inst[0]][inst[1]][inst[2]]
+        if kinst == 0:
+            rv_data['inst_id'] = np.zeros_like(data_inst['rjd'], dtype=int)
+            for key in data_inst:
+                try:
+                    if key == 'drs_qc': #qc: quality check
+                        rv_data[key] = np.array(data_inst[key], dtype=bool)    
+                    else:
+                        rv_data[key] = np.array(data_inst[key], dtype=float)
+                except:
+                    rv_data[key] = np.array(data_inst[key])
+                    pass
+        else:
+            rv_data['inst_id'] = np.concatenate((
+                rv_data['inst_id'],
+                np.full_like(data_inst['rjd'], kinst, dtype=int)))
+            for key in data_inst:
+                rv_data[key] = np.concatenate((rv_data[key], np.array(data_inst[key], dtype=rv_data[key].dtype)))
+
+    nt = rv_data['rjd'].size
+
+    for key in rv_data:
+        if rv_data[key].dtype == float:
+            rv_data[key][rv_data[key]==-99999] = np.nan
+    keep_crit = rv_data['drs_qc']
+    for key in ['rv', 'rv_err'] + indicators:
+        keep_crit = keep_crit & (rv_data[key] == rv_data[key])
+    for key in rv_data:
+        rv_data[key] = rv_data[key][keep_crit]
+
+    keep_inst = []
+    for kinst in range(ninst):
+        if kinst in rv_data['inst_id']:
+            keep_inst.append(kinst)
+    ninst = len(keep_inst)
+    instruments = [instruments[kinst] for kinst in keep_inst]
+    for newk, oldk in enumerate(keep_inst):
+        rv_data['inst_id'][rv_data['inst_id']==oldk] = newk
+
+    ksort = np.argsort(rv_data['rjd'])
+    for key in rv_data:
+        rv_data[key] = rv_data[key][ksort]
+    nt = rv_data['rjd'].size
+    Baseline = max(rv_data['rjd']) - min(rv_data['rjd'])
+    return nt,rv_data,Baseline,ninst,default_inst_jitter,instruments
+
+
+
+  def jitter(instruments,default_inst_jitter,rv_data,epoch_rjd,inst_jitter):
+    var_jitter = []
+    for inst in instruments:
+        if inst[0] in inst_jitter:
+            var_jitter.append(inst_jitter[inst[0]]**2)
+        elif inst[0] in default_inst_jitter:
+            var_jitter.append(default_inst_jitter[inst[0]]**2)
+        else:
+            var_jitter.append(default_inst_jitter['default']**2)
+    var_jitter = np.array(var_jitter)
+
+    rv_model = rvModel(
+        rv_data['rjd']-epoch_rjd,
+        rv_data['rv'],
+        rv_data['rv_err']**2,
+        inst_id=rv_data['inst_id'],
+        var_jitter_inst=var_jitter,
+        var_cos_qper=np.array([]), # No quasi periodic component
+        var_sin_qper=np.array([]),
+        lambda_qper=np.array([]),
+        nu_qper=np.array([]),
+        var_exp = np.array([1.0]),
+        lambda_exp = np.array([1/1.0]),  # Noise time scale is 1 day
+    )
+
+    rhk_model = rvModel(
+        rv_data['rjd']-epoch_rjd,
+        rv_data['rhk'],
+        rv_data['rv_err']**2,
+        inst_id=rv_data['inst_id'],
+        var_jitter_inst=var_jitter,
+        var_cos_qper=np.array([]), # No quasi periodic component
+        var_sin_qper=np.array([]),
+        lambda_qper=np.array([]),
+        nu_qper=np.array([]),
+        var_exp = np.array([1.0]),
+        lambda_exp = np.array([1/1.0]),  # Noise time scale is 1 day
+    )
+
+    rv_err = np.sqrt(rv_model.cov.A)
+    return rv_err,rv_model,rhk_model
+
+  
+  def dlamb(corr, dv, c):
+    for i in range(len(corr)-1):
+        if corr[i]==max(corr) :
+            imax=i
+    dlambda = dv[imax]*5000/c
+    return dlambda,imax
 
   def addlin(self, derivative, name=None, value=0.0, fitted=True):
     self.linM = np.vstack((self.linM, derivative))
