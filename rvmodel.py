@@ -13,8 +13,6 @@ class rvModel():
     self.rv = rv
     self.t = t
 
-    self.fitparams = []
-
   def wav_to_dvel(wav,c):
       dvel = (wav[1:] - wav[:-1]) / (wav[1:]) * c
       return dvel
@@ -50,3 +48,11 @@ class rvModel():
     e = -s+1
     dv = -dvel[s:e]
     return dv,corr
+
+  
+  def dlamb(corr, dv, c):
+    for i in range(len(corr)-1):
+        if corr[i]==max(corr) :
+            imax=i
+    dlambda = dv[imax]*5000/c
+    return dlambda,imax
